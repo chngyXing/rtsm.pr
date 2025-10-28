@@ -29,7 +29,8 @@ class ShinGLMCC(GLMCC):
             start = bin_edges[i]
             end = bin_edges[i + 1]
             diff_seg = self.theta[start:end-1] - self.theta[start+1:end]
-            smooth_penalty += beta_i / (2 * self.delta) * torch.sum(diff_seg**2)
+            ddiff_seg = (diff_seg[1:] - diff_seg[:-1]) * self.delta
+            smooth_penalty += beta_i / (2 * self.delta) * torch.sum(ddiff_seg[len(ddiff_seg) // 2 * i: len(ddiff_seg) // 2 * i + len(ddiff_seg) // 2]**2)
 
         log_posterior = (
             torch.dot(cc, theta_main)
@@ -85,7 +86,7 @@ if __name__ == "__main__":
     glm = GLMCC(delay=4.0)  # set synaptic delay to initialize GLMC
 
     fig, ax = plt.subplots(figsize=(3, 3))
-    idx_i, idx_j = 6, 7
+    idx_i, idx_j = 1, 5
 
     # relative spiketime (target neuron - reference neuron)
     t_sp = glm.spiketime_relative(spiketime_tar=list(df.query('neuron==@idx_i').spiketime), 
