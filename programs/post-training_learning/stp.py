@@ -87,7 +87,7 @@ class STP:
         self.a_post1 = torch.zeros_like(self.layers['excitatory'].V, device=self.device)
         self.a_post2 = torch.zeros_like(self.layers['excitatory'].V, device=self.device)
         self.time = 0.0
-        self.w = torch.randn((input_size, self.num_neurons), device=self.device)
+        self.w = torch.randn((input_size, self.num_neurons), device=self.device).abs()
         self.u_input = torch.full((input_size,), 0.0, device=self.device)
         self.x_input = torch.full((input_size,), 1.0, device=self.device)
         self.u_excitatory = torch.full((self.num_neurons,), 0.0, device=self.device)
@@ -97,6 +97,8 @@ class STP:
         self.spike_input = torch.zeros((input_size,), dtype=torch.bool, device=self.device)
         self.spike_excitatory = torch.zeros((self.num_neurons,), dtype=torch.bool, device=self.device)
         self.spike_inhibitory = torch.zeros((self.num_neurons,), dtype=torch.bool, device=self.device)
+        self.preferred_label = None
+        self.classes = None
 
     def reset(self):
         for layer in self.layers.values():
@@ -170,6 +172,7 @@ class STP:
         return spike_record_input, spike_record_excitatory
 
     def label_neurons(self, train_data, num_classes=10):
+        self.classes = num_classes
         num_neurons = self.layers['excitatory'].num_neuron
         response = torch.zeros((num_neurons, num_classes))
 
@@ -180,9 +183,22 @@ class STP:
 
             self.run(train=False, simtime=150.0)
 
-        preferred_label = torch.argmax(response, dim=1)
+        self.preferred_label = torch.argmax(response, dim=1)
 
-        return preferred_label
+        return self.preferred_label
+    
+    def get_label(self, input_data):
+        _, spike_record = self.run(input_data=input_data, simtime=350.0, train=False)
+        spike_count = spike_record.sum(dim=1)
+        if self.preferred_label is None:
+            raise ValueError("Neurons have not been labeled yet. Please run label_neurons() first.")
+        if spike_count.sum() == 0:
+            return None
+        votes = torch.zeros((self.classes,), device=self.device)
+        for label in range(self.classes):
+            votes[label] = spike_count[self.preferred_label == label].sum()
+
+        return torch.argmax(votes).item()
 
 
 def test():
