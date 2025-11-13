@@ -2,6 +2,7 @@ import torch
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+from torchvision import datasets, transforms
 
 class lif:
     def __init__(self, num_neuron=400, E_exc=0.0, E_inh=-100.0, E_rest=-65.0, V_thr=-52.0, tau=100.0, tau_ref=2.0, tau_e=2.0, tau_i=1.0, dt=0.1, device='cuda'):
@@ -122,7 +123,7 @@ class STP:
         if self.spike_input.any():
             self.a_pre[self.spike_input] = 1.0
             dw = self.lr_pre * self.a_post1.unsqueeze(0)
-            self.w[self.spike_input, :] += dw
+            self.w[self.spike_input, :] -= dw
 
         if self.spike_excitatory.any():
             self.a_post1[self.spike_excitatory] = 1.0
@@ -140,10 +141,13 @@ class STP:
 
         return r_input
     
-    def run(self, input_data=None, simtime=350.0, train=True):
+    def run(self, input_data=None, simtime=350.0, train=True, STP_on=True):
+        input_data = input_data.reshape(-1) if input_data is not None else None
         input_data = input_data.to(self.device) if input_data is not None else None
         if input_data is None:
             input_data = torch.zeros((self.layers['input'].num_neuron,), dtype=torch.bool, device=self.device)
+        input_data = input_data
+
         num_steps = int(simtime / self.dt)
         spike_record_excitatory = torch.zeros((self.layers['excitatory'].num_neuron, num_steps), dtype=torch.bool)
         spike_record_input = torch.zeros((self.layers['input'].num_neuron, num_steps), dtype=torch.bool)
@@ -151,8 +155,11 @@ class STP:
             self.spike_input = self.layers['input'].forward(w_e=input_data, 
                                                             w_i=torch.zeros((self.layers['input'].num_neuron,), dtype=torch.float32, device=self.device),
                                                             t=self.time)
-            r_input = self.STP()
-            w_effective = self.k * self.w * r_input.unsqueeze(1)
+            if STP_on:
+                r_input = self.STP()
+                w_effective = self.k * self.w * r_input.unsqueeze(1)
+            else:
+                w_effective = torch.zeros_like(self.w, device=self.device)
             self.spike_excitatory = self.layers['excitatory'].forward((self.w + w_effective)[self.spike_input].sum(dim=0), 
                                                                       torch.zeros((400,), dtype=torch.float32, device=self.device),
                                                                       self.time)
@@ -171,17 +178,23 @@ class STP:
 
         return spike_record_input, spike_record_excitatory
 
-    def label_neurons(self, train_data, num_classes=10):
+    def label_neurons(self, train_data, num_classes=10, STP_on=True):
         self.classes = num_classes
         num_neurons = self.layers['excitatory'].num_neuron
         response = torch.zeros((num_neurons, num_classes))
+        label_count = torch.zeros((num_classes,))
 
         for img, label in train_data:
-            _, spike_record = self.run(input_data=img, simtime=350.0, train=False)
+            _, spike_record = self.run(input_data=img, simtime=350.0, train=False, STP_on=STP_on)
             spike_count = spike_record.sum(dim=1)
             response[:, label] += spike_count
+            label_count[label] += 1
 
-            self.run(train=False, simtime=150.0)
+            self.run(train=False, simtime=150.0, STP_on=STP_on)
+
+        for c in range(num_classes):
+            if label_count[c] > 0:
+                response[:, c] /= label_count[c]
 
         self.preferred_label = torch.argmax(response, dim=1)
 
@@ -230,6 +243,59 @@ def test():
     print("\n每类神经元数量分布：")
     print(label_count)
 
+def get_mnist_data(batch_size=1, n_per_class=10, train=True):
+    transform = transforms.Compose([
+        transforms.Grayscale(),
+        transforms.ToTensor()
+    ])
+    dataset = datasets.MNIST(root='./data', train=train, download=True, transform=transform)
+    targets = np.array(dataset.targets)
+    indices = []
+    for i in range(10):
+        class_indices = np.where(targets == i)[0]
+        selected_indices = np.random.choice(class_indices, size=n_per_class, replace=False)
+        indices.extend(selected_indices)
+    subset = torch.utils.data.Subset(dataset, indices)
+    loader = torch.utils.data.DataLoader(subset, batch_size=batch_size, shuffle=True)
+    return loader
+
+def mnist_test():
+    model = STP(dt=0.1)
+
+    train_loader = get_mnist_data(batch_size=1, n_per_class=3, train=True)
+
+    print("训练网络中（含STDP学习）...")
+    for (img, label) in list(train_loader)[:20]:
+        img, label = img.squeeze(0), label.item()
+        model.run(input_data=img, simtime=350.0, train=True, STP_on=False)
+        model.run(train=False, simtime=150.0)
+
+    print("训练完成！")
+
+    print("根据神经元响应打标签...")
+    mnist_samples = [(img.squeeze(0), label.item()) for img, label in list(train_loader)[:20]]
+    preferred_label = model.label_neurons(mnist_samples, num_classes=10, STP_on=False)
+    print("标注完成！")
+
+    print("神经元的首选标签（前30个神经元）：")
+    print(preferred_label[:30])
+
+    label_count = pd.Series(preferred_label.cpu().numpy()).value_counts().sort_index()
+    print("\n每类神经元数量分布：")
+    for i, count in label_count.items():
+        print(f"{i}: {count}")
+
+        print("\n测试阶段（预测准确率）:")
+    correct, total = 0, 0
+    for (img, label) in list(train_loader)[20:]:
+        img = img.squeeze(0)
+        pred = model.get_label(img)
+        if pred is not None and pred == label.item():
+            correct += 1
+        total += 1
+
+    print(f"预测准确率: {correct}/{total} = {100 * correct / total:.2f}%")
+
 
 if __name__ == "__main__":
-    test()
+    mnist_test()
