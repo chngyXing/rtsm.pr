@@ -71,7 +71,7 @@ class lif:
         return spiked
     
 class STP:
-    def __init__(self, omega_d=2.0, omega_f=3.33, U_0=0.6, w_ei=10.5, w_ie=17.0e-5, lr_pre=1e-4, lr_post=1e-2, tau_post1=15.0, tau_post2=30.0, tau_pre=20.0, k=10.5, input_size=28*28, num_neurons=400, dt=0.1, theta_plus=0.1, tau_theta=1e7, device='cuda'):
+    def __init__(self, omega_d=2.0, omega_f=3.33, U_0=0.6, w_ei=10.5, w_ie=17.0e-5, lr_pre=1e-4, lr_post=1e-2, tau_post1=15.0, tau_post2=30.0, tau_pre=20.0, k=1.05, input_size=28*28, num_neurons=400, dt=0.1, theta_plus=0.1, tau_theta=1e7, device='cuda'):
         try:
             self.device = torch.device(device)
         except Exception as e:
@@ -560,13 +560,14 @@ def mnist_test():
 
     for _ in range(3):
         train_loader = get_mnist_data(batch_size=1, n_per_class=100, train=True)
+        total_spike_record_history = torch.tensor([0.0])
 
         print("Training the network...")
         for (img, label) in list(train_loader)[:800]:
             img, label = img.squeeze(0), label.item()
             print(f"Training sample label: {label}")
             while True:
-                input_spikking_record, spike_record = model.run(input_data=img, simtime=350.0, train=True, STP_on=True)
+                _, spike_record = model.run(input_data=img, simtime=350.0, train=True, STP_on=True)
                 model.run(train=False, simtime=150.0, STP_on=True)
                 spike_count = spike_record.float().sum(dim=1).cpu().numpy()
                 top10_idx = np.argsort(spike_count)[-10:][::-1]
@@ -578,6 +579,10 @@ def mnist_test():
                 else:
                     model.plus_max_rate(increment=1.0)
                     print(f"Increased max rate to {model.max_rate} to improve response.")
+
+            total_spike_record_history += spike_record.float().sum().cpu()
+
+        total_spike_record_history /= 800.0
 
         print("Training completed!")
 
@@ -613,8 +618,8 @@ def mnist_test():
         torch.save(model.w_input_exc, dir + "/saved_models/weights.pt")
         torch.save(model.theta, dir + "/saved_models/theta.pt")
         torch.save(gain, dir + "/saved_models/best_gain.pt")
-        torch.save(input_spikking_record, dir + f"/saved_models/input_spikking_history{timestemp}.pt")
-        torch.save(spike_record, dir + f"/saved_models/exc_spiking_history{timestemp}.pt")
+        torch.save(preferred_label, dir + f"/saved_models/preferred_label{timestemp}.pt")
+        torch.save(total_spike_record_history, dir + f"/saved_models/total_spike_record_history{timestemp}.pt")
         torch.save(pred_matrix, dir + f"/saved_models/pred_matrix{timestemp}.pt")
         print(f"Prediction accuracy: {correct}/{total} = {100 * correct / total:.2f}%")
 
