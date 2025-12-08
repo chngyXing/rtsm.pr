@@ -4,6 +4,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from torchvision import datasets, transforms
 import os
+import sys
 
 dir = os.path.dirname(__file__)
 
@@ -71,7 +72,7 @@ class lif:
         return spiked
     
 class STP:
-    def __init__(self, omega_d=2.0, omega_f=3.33, U_0=0.6, w_ei=10.5, w_ie=17.0e-5, lr_pre=1e-4, lr_post=1e-2, tau_post1=15.0, tau_post2=30.0, tau_pre=20.0, k=1.05, input_size=28*28, num_neurons=400, dt=0.1, theta_plus=0.1, tau_theta=1e7, device='cuda'):
+    def __init__(self, omega_d=2.0, omega_f=3.33, U_0=0.6, lr_pre=1e-4, lr_post=1e-2, tau_post1=15.0, tau_post2=30.0, tau_pre=20.0, k=10.5, input_size=28*28, num_neurons=400, dt=0.1, theta_plus=0.05, tau_theta=1.7e6, device='cuda'):
         try:
             self.device = torch.device(device)
         except Exception as e:
@@ -79,8 +80,6 @@ class STP:
         self.omega_d = omega_d
         self.omega_f = omega_f
         self.U_0 = U_0
-        self.w_ei = w_ei
-        self.w_ie = w_ie
         self.lr_pre = lr_pre
         self.lr_post = lr_post
         self.tau_post1 = tau_post1
@@ -129,36 +128,31 @@ class STP:
         self.w_input_inh = None
         self.load_recurrent_weights()
 
+        self.theta_count = 0
+
     def load_theta(self, test_mode=False, weight_path='./random/'):
         if test_mode:
             theta_file = os.path.join(weight_path.replace('random', 'weights'), 'theta_A.npy')
         else:
-            # 训练模式：初始化为默认值
             if self.theta is None:
                 self.theta = torch.ones((self.num_neurons,), device=self.device) * 20.0
             return
         
         try:
             if os.path.exists(theta_file):
-                # 加载Brian2格式的theta文件
                 theta_data = np.load(theta_file)
                 print(f"Loading theta from {theta_file}, shape: {theta_data.shape}")
                 
-                # Brian2的theta单位是volt，需要转换
-                if theta_data.max() < 1.0:  # 如果最大值小于1，可能是以V为单位
-                    theta_data = theta_data * 1000  # 转换为mV
+                if theta_data.max() < 1.0:
+                    theta_data = theta_data * 1000
                 
-                # 转换为张量
                 theta_tensor = torch.from_numpy(theta_data.astype(np.float32)).to(self.device)
                 
-                # 确保尺寸匹配
                 if theta_tensor.shape[0] != self.num_neurons:
                     print(f"Warning: theta size mismatch. Expected {self.num_neurons}, got {theta_tensor.shape[0]}")
                     if theta_tensor.shape[0] > self.num_neurons:
-                        # 如果文件中的theta更多，截取前num_neurons个
                         theta_tensor = theta_tensor[:self.num_neurons]
                     else:
-                        # 如果文件中的theta较少，扩展到匹配尺寸
                         extended_theta = torch.ones(self.num_neurons, device=self.device) * 20.0
                         extended_theta[:theta_tensor.shape[0]] = theta_tensor
                         theta_tensor = extended_theta
@@ -177,6 +171,17 @@ class STP:
     def update_theta(self):
         self.theta -= self.theta * (self.dt /  self.tau_theta)
         self.theta[self.spike_excitatory] += self.theta_plus
+
+    def normolize_theta(self):
+        if self.spike_excitatory.any():
+            self.theta_count = 0
+        else:
+            self.theta_count += 1
+
+        if self.theta_count >= 10000:
+            theta_sum = self.theta.sum()
+            self.theta = self.theta * (self.num_neurons * 40.0 / theta_sum)
+            self.theta_count = 0
 
     def load_recurrent_weights(self):
         aeai_file = os.path.join(dir + '/random/', 'AeAi.npy')
@@ -199,34 +204,28 @@ class STP:
         sparse_data = np.load(weight_file)
         print(f"Loading Brian2 weights from {weight_file}, shape: {sparse_data.shape}")
         
-        # 根据文件名确定正确的权重矩阵尺寸
         filename = os.path.basename(weight_file)
         if 'XeAe' in filename:
-            # 输入层到兴奋性层: (784, 400)
             weight_matrix = torch.zeros((self.input_size, self.num_neurons), 
                                        dtype=self.dtype, device=self.device)
             expected_i_max, expected_j_max = self.input_size - 1, self.num_neurons - 1
             
         elif 'XeAi' in filename:
-            # 输入层到抑制性层: (784, 400)
             weight_matrix = torch.zeros((self.input_size, self.num_neurons), 
                                        dtype=self.dtype, device=self.device)
             expected_i_max, expected_j_max = self.input_size - 1, self.num_neurons - 1
             
         elif 'AeAi' in filename:
-            # 兴奋性到抑制性: (400, 400)
             weight_matrix = torch.zeros((self.num_neurons, self.num_neurons), 
                                        dtype=self.dtype, device=self.device)
             expected_i_max, expected_j_max = self.num_neurons - 1, self.num_neurons - 1
             
         elif 'AiAe' in filename:
-            # 抑制性到兴奋性: (400, 400)
             weight_matrix = torch.zeros((self.num_neurons, self.num_neurons), 
                                        dtype=self.dtype, device=self.device)
             expected_i_max, expected_j_max = self.num_neurons - 1, self.num_neurons - 1
             
         else:
-            # 默认为输入到兴奋性连接
             print(f"Unknown weight file type: {filename}, using default (784, 400)")
             weight_matrix = torch.zeros((self.input_size, self.num_neurons), 
                                        dtype=self.dtype, device=self.device)
@@ -245,7 +244,6 @@ class STP:
             print(f"Index ranges: i=[0,{max_i}], j=[0,{max_j}]")
             print(f"Expected: i=[0,{expected_i_max}], j=[0,{expected_j_max}]")
             
-            # 检查索引是否在有效范围内
             valid_mask = (i_indices <= expected_i_max) & (j_indices <= expected_j_max)
             if not valid_mask.all():
                 print(f"Warning: {(~valid_mask).sum()} invalid connections found")
@@ -298,7 +296,7 @@ class STP:
             self.a_post1[self.spike_excitatory] = 1.0
             self.a_post2[self.spike_excitatory] = 1.0
 
-        self.w_input_exc = self.w_input_exc.clamp(min=0.0)
+        self.w_input_exc = self.w_input_exc.clamp(min=0.0, max=1.0)
 
     def STP(self):
         self.u_input -= self.u_input * (self.dt * self.omega_f)
@@ -311,6 +309,10 @@ class STP:
         return r_input
     
     def poisson_spike_train(self, img, simtime=350.0, dt=1.0, max_rate=2.0):
+        '''
+        ganerate Poisson spike trains from input image
+        img: input image tensor, shape (28, 28)
+        '''
         img_flat = img.flatten()
         
         T = int(simtime / dt)
@@ -329,6 +331,9 @@ class STP:
         self.w_input_exc = self.w_input_exc / row_sums * 78.0
 
     def active_inhibition(self, excitatory_input, recent_activity, inhibition_strength=0.5):
+        '''
+        inhibitory mechanism based on recent excitatory activity
+        '''
         inhibition = recent_activity.float().mean() * inhibition_strength
         output = excitatory_input - inhibition
         return output
@@ -363,26 +368,27 @@ class STP:
                 r_input = self.STP()
                 w_effective = self.k * torch.mv(self.w_input_exc.T, r_input.float())
             else:
-                w_effective = torch.zeros_like(self.w_input_exc, device=self.device)
+                w_effective = torch.zeros_like(self.spike_excitatory, device=self.device)
 
             excitatory_input = self.active_inhibition(torch.mv(self.w_input_exc.T, self.spike_input.float()) + w_effective, recent_excitatory_activity, inhibition_strength=0.5)
 
             self.spike_excitatory = self.layers['excitatory'].forward(w_e=excitatory_input, 
-                                                                    w_i=self.w_ie * (torch.mv(self.w_inh_exc.T, self.spike_inhibitory.float())),
+                                                                    w_i=(torch.mv(self.w_inh_exc.T, self.spike_inhibitory.float())),
                                                                     t=self.time,
                                                                     theta=self.theta)
-            self.spike_inhibitory = self.layers['inhibitory'].forward(w_e=self.w_ei * (torch.mv(self.w_exc_inh.T, self.spike_excitatory.float())), 
+            self.spike_inhibitory = self.layers['inhibitory'].forward(w_e=(torch.mv(self.w_exc_inh.T, self.spike_excitatory.float())), 
                                                                     w_i=torch.zeros((400,), dtype=torch.float64, device=self.device), 
                                                                     t=self.time)
             if train:
                 self.update_theta()
+                #self.normolize_theta()
                 self.STDP()
             spike_record_input[:, step] = self.spike_input
             spike_record_excitatory[:, step] = self.spike_excitatory
             self.time += self.dt
             recent_excitatory_activity = self.recent_excitatory_activity_update(recent_excitatory_activity)
-            print(f'V: {self.layers["excitatory"].V.mean():>10.5f} | V_thr mean: {self.layers["excitatory"].V_thr.mean():.2f} | {self.layers["inhibitory"].V.mean():>10.5f} | {self.layers["inhibitory"].V_thr.mean():.2f} | inh_g_e: {self.layers["inhibitory"].g_e.mean():>10.5f} | {self.spike_input.sum():>10} | {self.spike_excitatory.sum():>10} | {self.spike_inhibitory.sum():>10} | {self.theta.mean():.2f} | {self.layers["excitatory"].g_e.sum():>10.5f} | g_i: {self.layers["excitatory"].g_i.sum():>10.5f} | time: {self.time:.1f} ms', end='\r')
-        
+            print(f'Time: {self.time:.1f} ms', end='\r')
+            
         '''
         spike_record_excitatory_mask = spike_record_excitatory.float().sum(dim=1) > 0
         spike_record_input_mask = spike_record_input.float().sum(dim=1) > 0
@@ -412,7 +418,7 @@ class STP:
             while True:
                 _, spike_record = self.run(input_data=img, simtime=350.0, train=False, STP_on=STP_on)
                 self.run(train=False, simtime=150.0, STP_on=STP_on)
-                if spike_record.float().sum(dim=0).max().item() >= 5:
+                if spike_record.float().sum().item() >= 5:
                     self.reset_max_rate()
                     break
                 else:
@@ -432,6 +438,8 @@ class STP:
                 )
                 
                 print(f"Assignment update: {torch.bincount(assignments.long(), minlength=10)}")
+            
+            print(f"Processed sample {j+1}/{len(train_data)}")
         
         if len(input_numbers) % update_interval != 0:
             remaining_samples = len(input_numbers) % update_interval
@@ -468,20 +476,19 @@ class STP:
         while True:
             _, spike_record = self.run(input_data=input_data, simtime=350.0, train=False, STP_on=STP_on)
             self.run(train=False, simtime=150.0, STP_on=STP_on)
-            if spike_record.float().sum(dim=0).max().item() >= 5:
+            if spike_record.float().sum().item() >= 5:
                 self.reset_max_rate()
-                print(f"response good. Reset max rate to {self.max_rate}.")
                 break
             else:
                 self.plus_max_rate(increment=1.0)
-                print(f"Increased max rate to {self.max_rate} to improve response.")
 
         spike_count = spike_record.sum(dim=1)
         if self.preferred_label is None:
             raise ValueError("Neurons have not been labeled yet. Please run label_neurons() first.")
         if spike_count.sum() == 0:
             return None
-        
+
+    
         votes = torch.zeros((len(self.classes),), device=self.device)
         for i, label in enumerate(self.classes):
             votes[i] = spike_count[self.preferred_label == label].sum()
@@ -491,6 +498,33 @@ class STP:
             return None
 
         return self.classes[best_class_idx].item()
+    
+    def get_label_spike(self, input_data, STP_on=True):
+        while True:
+            _, spike_record = self.run(input_data=input_data, simtime=350.0, train=False, STP_on=STP_on)
+            self.run(train=False, simtime=150.0, STP_on=STP_on)
+            if spike_record.float().sum().item() >= 5:
+                self.reset_max_rate()
+                break
+            else:
+                self.plus_max_rate(increment=1.0)
+
+        spike_count = spike_record.sum(dim=1)
+        if self.preferred_label is None:
+            raise ValueError("Neurons have not been labeled yet. Please run label_neurons() first.")
+        if spike_count.sum() == 0:
+            return None
+
+    
+        votes = torch.zeros((len(self.classes),), device=self.device)
+        for i, label in enumerate(self.classes):
+            votes[i] = spike_count[self.preferred_label == label].sum()
+
+        best_class_idx = torch.argmax(votes)
+        if votes[best_class_idx] == 0:
+            return None
+
+        return self.classes[best_class_idx].item(), spike_record
     
     def reset_max_rate(self):
         self.max_rate = 2.0
@@ -547,47 +581,46 @@ def get_mnist_data(batch_size=1, n_per_class=10, train=True):
 
 def mnist_test():
     model = STP(dt=0.1)
-    if os.path.exists("saved_models/weights.pt"):
-        w = torch.load("saved_models/weights.pt", map_location=model.device)
-        theta = torch.load("saved_models/theta.pt", map_location=model.device)
+    if os.path.exists(dir + "/saved_models/weights.pt"):
+        w = torch.load(dir + "/saved_models/weights.pt", map_location=model.device)
+        theta = torch.load(dir + "/saved_models/theta.pt", map_location=model.device)
         model.w_input_exc = w
         model.theta = theta
-        gain = torch.load("saved_models/best_gain.pt")
+        gain = torch.load(dir + "/saved_models/best_gain.pt")
         print("Loaded pre-trained weights.")
     else:
         print("No pre-trained weights found.")
         gain = torch.tensor([])
 
-    for _ in range(3):
-        train_loader = get_mnist_data(batch_size=1, n_per_class=100, train=True)
+    subset = 200
+
+    for _ in range(4):
+        train_loader = get_mnist_data(batch_size=1, n_per_class=30, train=True)
         total_spike_record_history = torch.tensor([0.0])
 
         print("Training the network...")
-        for (img, label) in list(train_loader)[:800]:
+        for i, (img, label) in enumerate(list(train_loader)[:subset]):
             img, label = img.squeeze(0), label.item()
-            print(f"Training sample label: {label}")
             while True:
                 _, spike_record = model.run(input_data=img, simtime=350.0, train=True, STP_on=True)
                 model.run(train=False, simtime=150.0, STP_on=True)
-                spike_count = spike_record.float().sum(dim=1).cpu().numpy()
-                top10_idx = np.argsort(spike_count)[-10:][::-1]
-                print(f'{(spike_record.float().sum(dim=1) > 0).sum().item()} neurons responded. {spike_record.float().sum(dim=0).max().item()} max response count in a single instance. Neurons {top10_idx} response counts')
-                if spike_record.float().sum(dim=0).max().item() >= 5:
+                print(f'{(spike_record.float().sum(dim=1) > 0).sum().item()} neurons responded. {spike_record.float().sum(dim=0).max().item()} max response count in a single instance.', end='\r')
+                if spike_record.float().sum().item() >= 5:
                     model.reset_max_rate()
-                    print(f"Sample {label} responded well. Reset max rate to {model.max_rate}.")
                     break
                 else:
                     model.plus_max_rate(increment=1.0)
-                    print(f"Increased max rate to {model.max_rate} to improve response.")
 
+            print(' ' * 100, end='\r')
+            print(f'{i+1} / {subset} ({(i+1) / subset:.2%}). label: {label}. {(spike_record.float().sum(dim=1) > 0).sum().item()} neurons responded. {spike_record.float().sum(dim=0).max().item()} max response count in a single instance. {torch.argsort(spike_record.float().sum(dim=1), descending=True)[:10]} top 10 spiking neurons.')
             total_spike_record_history += spike_record.float().sum().cpu()
 
-        total_spike_record_history /= 800.0
+        total_spike_record_history /= subset
 
         print("Training completed!")
 
         print("Labeling neurons based on their responses...")
-        mnist_samples = [(img.squeeze(0), label.item()) for img, label in list(train_loader)[:800]]
+        mnist_samples = [(img.squeeze(0), label.item()) for img, label in list(train_loader)[:subset]]
         preferred_label = model.label_neurons(mnist_samples, update_interval=200, STP_on=True)
         print("Labeling completed!")
 
@@ -602,7 +635,7 @@ def mnist_test():
         print("\nTesting phase (prediction accuracy):")
         pred_matrix = torch.zeros((10, 10), dtype=torch.int32)
         correct, total = 0, 0
-        for (img, label) in list(train_loader)[800:]:
+        for (img, label) in list(train_loader)[subset:]:
             img = img.squeeze(0)
             pred = model.get_label(img, STP_on=True)
             if pred is not None and pred == label.item():
@@ -623,6 +656,201 @@ def mnist_test():
         torch.save(pred_matrix, dir + f"/saved_models/pred_matrix{timestemp}.pt")
         print(f"Prediction accuracy: {correct}/{total} = {100 * correct / total:.2f}%")
 
+def mnist_test_no_stp():
+    model = STP(dt=0.1)
+    if os.path.exists(dir + "/saved_models_no_stp/weights.pt"):
+        w = torch.load(dir + "/saved_models_no_stp/weights.pt", map_location=model.device)
+        theta = torch.load(dir + "/saved_models_no_stp/theta.pt", map_location=model.device)
+        model.w_input_exc = w
+        model.theta = theta
+        gain = torch.load(dir + "/saved_models_no_stp/best_gain.pt")
+        print("Loaded pre-trained weights.")
+    else:
+        print("No pre-trained weights found.")
+        gain = torch.tensor([])
+
+    subset = 200
+
+    for _ in range(4):
+        train_loader = get_mnist_data(batch_size=1, n_per_class=30, train=True)
+        total_spike_record_history = torch.tensor([0.0])
+
+        print("Training the network...")
+        for i, (img, label) in enumerate(list(train_loader)[:subset]):
+            img, label = img.squeeze(0), label.item()
+            while True:
+                _, spike_record = model.run(input_data=img, simtime=350.0, train=True, STP_on=False)
+                model.run(train=False, simtime=150.0, STP_on=False)
+                print(f'{(spike_record.float().sum(dim=1) > 0).sum().item()} neurons responded. {spike_record.float().sum(dim=0).max().item()} max response count in a single instance.', end='\r')
+                if spike_record.float().sum().item() >= 5:
+                    model.reset_max_rate()
+                    break
+                else:
+                    model.plus_max_rate(increment=1.0)
+
+            print(' ' * 100, end='\r')
+            print(f'{i+1} / {subset} ({(i+1) / subset:.2%}). label: {label}. {(spike_record.float().sum(dim=1) > 0).sum().item()} neurons responded. {spike_record.float().sum(dim=0).max().item()} max response count in a single instance. {torch.argsort(spike_record.float().sum(dim=1), descending=True)[:10]} top 10 spiking neurons.')
+            total_spike_record_history += spike_record.float().sum().cpu()
+
+        total_spike_record_history /= subset
+
+        print("Training completed!")
+
+        print("Labeling neurons based on their responses...")
+        mnist_samples = [(img.squeeze(0), label.item()) for img, label in list(train_loader)[:subset]]
+        preferred_label = model.label_neurons(mnist_samples, update_interval=200, STP_on=False)
+        print("Labeling completed!")
+
+        print("Preferred labels of neurons (first 30 neurons):")
+        print(preferred_label[:30])
+
+        label_count = pd.Series(preferred_label.cpu().numpy()).value_counts().sort_index()
+        print("\nDistribution of neurons per class:")
+        for i, count in label_count.items():
+            print(f"{i}: {count}")
+
+        print("\nTesting phase (prediction accuracy):")
+        pred_matrix = torch.zeros((10, 10), dtype=torch.int32)
+        correct, total = 0, 0
+        for (img, label) in list(train_loader)[subset:]:
+            img = img.squeeze(0)
+            pred = model.get_label(img, STP_on=False)
+            if pred is not None and pred == label.item():
+                correct += 1
+            total += 1
+            if pred is not None:
+                pred_matrix[label.item(), pred] += 1
+
+        if os.path.exists(dir + "/saved_models_no_stp") == False:
+            os.makedirs(dir + "/saved_models_no_stp", exist_ok=True)
+        timestemp = pd.Timestamp.now().strftime("%Y%m%d_%H%M%S")
+        gain = torch.cat((gain, torch.tensor([100 * correct / total])))
+        torch.save(model.w_input_exc, dir + "/saved_models_no_stp/weights.pt")
+        torch.save(model.theta, dir + "/saved_models_no_stp/theta.pt")
+        torch.save(gain, dir + "/saved_models_no_stp/best_gain.pt")
+        torch.save(preferred_label, dir + f"/saved_models_no_stp/preferred_label{timestemp}.pt")
+        torch.save(total_spike_record_history, dir + f"/saved_models_no_stp/total_spike_record_history{timestemp}.pt")
+        torch.save(pred_matrix, dir + f"/saved_models_no_stp/pred_matrix{timestemp}.pt")
+        print(f"Prediction accuracy: {correct}/{total} = {100 * correct / total:.2f}%")
+
+def ncs(spike_record, dt=0.1, tau=20.0):
+    num_neurons, num_steps = spike_record.shape
+    device = spike_record.device
+    ncs_values = torch.zeros((num_neurons,), device=device)
+    ncs_trace = torch.zeros((num_neurons,), device=device)
+    for step in range(num_steps):
+        spikes = spike_record[:, step].float()
+        ncs_trace -= ncs_trace * (dt / tau)
+        ncs_values += ncs_trace * spikes
+        ncs_trace = torch.where(spikes.bool(), torch.ones_like(ncs_trace, device=device), ncs_trace)
+        print(f'Calculating ncs: {step+1}/{num_steps}', end='\r')
+
+    return ncs_values
+
+def get_ncs():
+    model = STP(dt=0.1)
+    weights_path = os.path.join(dir, "saved_models")
+    if os.path.exists(os.path.join(weights_path, "weights.pt")):
+        model.w_input_exc = torch.load(os.path.join(weights_path, "weights.pt"), map_location=model.device)
+        model.theta = torch.load(os.path.join(weights_path, "theta.pt"), map_location=model.device)
+        model.preferred_label = torch.load(os.path.join(weights_path, "preferred_label.pt"), map_location=model.device)
+        model.classes = torch.unique(model.preferred_label).sort().values
+        print("Loaded pre-trained weights.")
+    else:
+        print("Warning: No pre-trained weights found. Running with random initialization.")
+
+    ncs_data = torch.zeros(400, 50) 
+    
+    raw_test_data = get_mnist_data(batch_size=1, n_per_class=20, train=True)
+    test_samples = list(raw_test_data) 
+    
+    true_count = 0
+    total_processed = 0
+    samples_per_step = 4
+
+    print(f"Starting NCS evaluation on {len(test_samples)} samples...")
+
+    for i in range(50):
+        batch_samples = test_samples[i * samples_per_step : (i + 1) * samples_per_step]
+        
+        for img, label in batch_samples:
+            if img.dim() > 2: 
+                img = img.squeeze(0)
+            
+            lb, spike_record = model.get_label_spike(img, STP_on=True)
+            
+            ncs_values = ncs(spike_record, dt=0.1, tau=20.0)
+            
+            ncs_data[:, i] += ncs_values.cpu()
+            
+            if lb == label.item():
+                true_count += 1
+            
+            total_processed += 1
+            
+        sys.stdout.write(f'\rProcessing time step {i+1}/50 | Total samples: {total_processed}/200 | Current Acc: {100 * true_count / total_processed:.1f}%')
+        sys.stdout.flush()
+
+    print(f'\nFinal Accuracy: {true_count}/200 = {100 * true_count / 200:.2f}%')
+    save_path = os.path.join(dir, "data", "ncs_data.pt")
+    if os.path.exists(dir + "/data") == False:
+        os.makedirs(dir + "/data", exist_ok=True)
+    torch.save(ncs_data, save_path)
+    print(f"NCS data saved to {save_path}")
+
+def get_ncs_no_stp():
+    model = STP(dt=0.1)
+    weights_path = os.path.join(dir, "saved_models_no_stp")
+    if os.path.exists(os.path.join(weights_path, "weights.pt")):
+        model.w_input_exc = torch.load(os.path.join(weights_path, "weights.pt"), map_location=model.device)
+        model.theta = torch.load(os.path.join(weights_path, "theta.pt"), map_location=model.device)
+        model.preferred_label = torch.load(os.path.join(weights_path, "preferred_label.pt"), map_location=model.device)
+        model.classes = torch.unique(model.preferred_label).sort().values
+        print("Loaded pre-trained weights.")
+    else:
+        print("Warning: No pre-trained weights found. Running with random initialization.")
+
+    ncs_data = torch.zeros(400, 50) 
+    
+    raw_test_data = get_mnist_data(batch_size=1, n_per_class=20, train=True)
+    all_test_samples = list(raw_test_data) 
+    
+    true_count = 0
+    total_processed = 0
+    samples_per_step = 4
+
+    print(f"Starting NCS evaluation on {len(all_test_samples)} samples...")
+
+    for i in range(50):
+        batch_samples = all_test_samples[i * samples_per_step : (i + 1) * samples_per_step]
+        
+        for img, label in batch_samples:
+            if img.dim() > 2: 
+                img = img.squeeze(0)
+            
+            lb, spike_record = model.get_label_spike(img, STP_on=False)
+            
+            ncs_values = ncs(spike_record, dt=0.1, tau=20.0)
+            
+            ncs_data[:, i] += ncs_values.cpu()
+            
+            if lb == label.item():
+                true_count += 1
+            
+            total_processed += 1
+            
+        sys.stdout.write(f'\rProcessing time step {i+1}/50 | Total samples: {total_processed}/200 | Current Acc: {100 * true_count / total_processed:.1f}%')
+        sys.stdout.flush()
+
+    print(f'\nFinal Accuracy: {true_count}/200 = {100 * true_count / 200:.2f}%')
+
+    if os.path.exists(dir + "/data") == False:
+        os.makedirs(dir + "/data", exist_ok=True)
+    save_path = os.path.join(dir, "data", "ncs_data_no_stp.pt")
+    torch.save(ncs_data, save_path)
+    print(f"NCS data saved to {save_path}")
+
 
 if __name__ == "__main__":
-    mnist_test()
+    get_ncs()
+    get_ncs_no_stp()
